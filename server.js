@@ -28,6 +28,7 @@ app.get('/', (req, res) => {
 
 io.on('connection', (socket) => {
 
+  // Channel ထဲသို့ ဝင်ရောက်ခြင်း
   socket.on('join_channel', (data) => {
     try {
       const channelName = data.channelName;
@@ -43,14 +44,15 @@ io.on('connection', (socket) => {
         if (!channelUsers[channelName]) {
           channelUsers[channelName] = [];
         }
+
         // နာမည်တူ မရှိစေရန် အရင်ဖယ်ပြီးမှ ထည့်မည်
         channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
         channelUsers[channelName].push(username);
 
         socket.emit('join_result', { success: true, message: `Connected to ${channelName}` });
 
-        // User စာရင်းအသစ်ကို Channel ထဲရှိ သူအားလုံးဆီ ပို့မည်
-        io.to(channelName).emit('update_user_list', { users: channelUsers[channelName] });
+        // App ဘက်သို့ 'online_users' event ဖြင့် Array ပို့ပေးခြင်း
+        io.to(channelName).emit('online_users', channelUsers[channelName]);
 
         // Active Speaker အခြေအနေ ပို့မည်
         if (activeSpeakers[channelName]) {
@@ -67,6 +69,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // စကားပြောခွင့် တောင်းဆိုခြင်း
   socket.on('request_talk', (data) => {
     const channelName = data.channelName;
     const username = data.username;
@@ -80,12 +83,14 @@ io.on('connection', (socket) => {
     }
   });
 
+  // စကားပြောခြင်း ရပ်တန့်ခြင်း
   socket.on('stop_talk', (data) => {
     const channelName = data.channelName;
     delete activeSpeakers[channelName];
     io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
   });
 
+  // Audio Streaming ပို့ပေးခြင်း
   socket.on('send_audio', (data) => {
     try {
       if (data && data.channelName) {
@@ -96,6 +101,22 @@ io.on('connection', (socket) => {
     }
   });
 
+  // 💌 Offline/User ထံ Notification/Nudge ပို့သည့် Event
+  socket.on('send_nudge_notification', (data) => {
+    try {
+      const { channelName, targetUser, fromUser } = data;
+      // Channel ထဲရှိ အခြား User များဆီသို့ Nudge Event Broadcast လုပ်ပေးမည်
+      socket.to(channelName).emit('receive_nudge', {
+        targetUser: targetUser,
+        fromUser: fromUser,
+        message: `${fromUser} က သင့်ကို စကားပြောချင်လို့ ခေါ်နေပါတယ်! 💌`
+      });
+    } catch (err) {
+      console.error(err);
+    }
+  });
+
+  // User ထွက်သွားပါက စာရင်းမှ ဖျက်ပြီး Update ပြန်ပို့ပေးခြင်း
   socket.on('disconnecting', () => {
     const channelName = socket.channelName;
     const username = socket.username;
@@ -108,7 +129,8 @@ io.on('connection', (socket) => {
 
       if (channelUsers[channelName] && username) {
         channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
-        io.to(channelName).emit('update_user_list', { users: channelUsers[channelName] });
+        // ထွက်သွားပြီးနောက် ကျန်ရှိသူများထံ စာရင်းသစ် ပြန်ပို့ပေးမည်
+        io.to(channelName).emit('online_users', channelUsers[channelName]);
       }
     }
   });
