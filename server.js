@@ -97,15 +97,18 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnecting', () => {
-    for (const room of socket.rooms) {
-      if (activeSpeakers[room]) {
-        delete activeSpeakers[room];
-        io.to(room).emit('floor_status', { isBusy: false, speaker: "" });
+    const channelName = socket.channelName;
+    const username = socket.username;
+
+    if (channelName) {
+      if (activeSpeakers[channelName] === username) {
+        delete activeSpeakers[channelName];
+        io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
       }
 
-      if (channelUsers[room] && socket.username) {
-        channelUsers[room] = channelUsers[room].filter(u => u !== socket.username);
-        io.to(room).emit('update_user_list', { users: channelUsers[room] });
+      if (channelUsers[channelName] && username) {
+        channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
+        io.to(channelName).emit('update_user_list', { users: channelUsers[channelName] });
       }
     }
   });
