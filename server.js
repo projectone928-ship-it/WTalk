@@ -15,29 +15,61 @@ const io = new Server(server, {
   pingInterval: 25000
 });
 
+// 🔑 သတ်မှတ်ထားသော Channel Name နှင့် Password
+const CHANNELS = {
+  "Quarkofficial9": "quarkmemberonly9"
+};
+
 // မည်သည့် Channel ထဲတွင် မည်သူ စကားပြောနေသလဲ မှတ်ထားရန်
 const activeSpeakers = {};
 
 app.get('/', (req, res) => {
-  res.send("Walkie-Talkie Audio Server with Floor Control is Running!");
+  res.send("Walkie-Talkie Audio Server with Channel Password Control is Running!");
 });
 
 io.on('connection', (socket) => {
 
-  // Channel ထဲဝင်ရောက်ခြင်း
+  // Channel ထဲဝင်ရောက်ခြင်း (Password Verification)
   socket.on('join_channel', (data) => {
     try {
-      const channelName = data.channelName || "Default_Channel";
-      socket.join(channelName);
-      
-      // လက်ရှိ စကားပြောနေသူရှိပါက ထိုအချက်အလက်ကို ပို့ပေးမည်
-      if (activeSpeakers[channelName]) {
-        socket.emit('floor_status', { isBusy: true, speaker: activeSpeakers[channelName] });
+      const channelName = data.channelName;
+      const password = data.password;
+      const username = data.username;
+
+      // Channel Name နှင့် Password စစ်ဆေးခြင်း
+      if (CHANNELS[channelName] && CHANNELS[channelName] === password) {
+        
+        socket.join(channelName);
+        socket.username = username;
+        socket.channelName = channelName;
+
+        // App ဘက်သို့ အောင်မြင်ကြောင်း ပြန်အသိပေးမည်
+        socket.emit('join_result', {
+          success: true,
+          message: `Successfully connected to ${channelName}`
+        });
+
+        // လက်ရှိ စကားပြောနေသူရှိပါက ထိုအချက်အလက်ကို ပို့ပေးမည်
+        if (activeSpeakers[channelName]) {
+          socket.emit('floor_status', { isBusy: true, speaker: activeSpeakers[channelName] });
+        } else {
+          socket.emit('floor_status', { isBusy: false, speaker: "" });
+        }
+
       } else {
-        socket.emit('floor_status', { isBusy: false, speaker: "" });
+        // Password မှားယွင်းပါက သို့မဟုတ် Channel မရှိပါက ငြင်းပယ်မည်
+        socket.emit('join_result', {
+          success: false,
+          message: "Invalid Channel Name or Password!"
+        });
       }
+
     } catch (err) {
       console.error(err);
+      socket.emit('join_result', {
+        success: false,
+        message: "Server internal error!"
+      });
     }
   });
 
@@ -47,14 +79,10 @@ io.on('connection', (socket) => {
     const username = data.username;
 
     if (!activeSpeakers[channelName]) {
-      // မည်သူမျှ စကားမပြောသေးပါက အခွင့်အရေး ပေးမည်
       activeSpeakers[channelName] = username;
-      socket.emit('talk_granted'); // ခွင့်ပြုချက် ရရှိကြောင်း မိမိထံ ပြန်ပို့မည်
-      
-      // ကျန်သူများဆီသို့ လိုင်းမအားသေးကြောင်း အသိပေးမည်
+      socket.emit('talk_granted');
       socket.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
     } else {
-      // အခြားသူ ပြောနေပါက ခွင့်မပြုပါ
       socket.emit('talk_denied');
     }
   });
@@ -63,8 +91,6 @@ io.on('connection', (socket) => {
   socket.on('stop_talk', (data) => {
     const channelName = data.channelName;
     delete activeSpeakers[channelName];
-
-    // လိုင်းပြန်အားသွားကြောင်း Channel ထဲရှိ သူများဆီ အသိပေးမည်
     io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
   });
 
@@ -80,7 +106,6 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnecting', () => {
-    // လိုင်းပြတ်သွားသူ ပြောနေခဲ့ပါက လိုင်းကို ပြန်ဖွင့်ပေးမည်
     for (const room of socket.rooms) {
       if (activeSpeakers[room]) {
         delete activeSpeakers[room];
