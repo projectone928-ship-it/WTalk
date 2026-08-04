@@ -15,41 +15,44 @@ const io = new Server(server, {
   pingInterval: 25000
 });
 
-// 🔑 သတ်မှတ်ထားသော Channel Name နှင့် Password
 const CHANNELS = {
   "Quarkofficial9": "quarkmemberonly9"
 };
 
-// မည်သည့် Channel ထဲတွင် မည်သူ စကားပြောနေသလဲ မှတ်ထားရန်
 const activeSpeakers = {};
+const channelUsers = {}; // Channel တစ်ခုချင်းစီအလိုက် Online ရှိနေသူများ စာရင်း
 
 app.get('/', (req, res) => {
-  res.send("Walkie-Talkie Audio Server with Channel Password Control is Running!");
+  res.send("Walkie-Talkie Audio Server with Active Users List is Running!");
 });
 
 io.on('connection', (socket) => {
 
-  // Channel ထဲဝင်ရောက်ခြင်း (Password Verification)
   socket.on('join_channel', (data) => {
     try {
       const channelName = data.channelName;
       const password = data.password;
       const username = data.username;
 
-      // Channel Name နှင့် Password စစ်ဆေးခြင်း
       if (CHANNELS[channelName] && CHANNELS[channelName] === password) {
-        
         socket.join(channelName);
         socket.username = username;
         socket.channelName = channelName;
 
-        // App ဘက်သို့ အောင်မြင်ကြောင်း ပြန်အသိပေးမည်
-        socket.emit('join_result', {
-          success: true,
-          message: `Successfully connected to ${channelName}`
-        });
+        // Channel user list ထဲသို့ ထည့်မည်
+        if (!channelUsers[channelName]) {
+          channelUsers[channelName] = [];
+        }
+        // နာမည်တူ မရှိစေရန် အရင်ဖယ်ပြီးမှ ထည့်မည်
+        channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
+        channelUsers[channelName].push(username);
 
-        // လက်ရှိ စကားပြောနေသူရှိပါက ထိုအချက်အလက်ကို ပို့ပေးမည်
+        socket.emit('join_result', { success: true, message: `Connected to ${channelName}` });
+
+        // User စာရင်းအသစ်ကို Channel ထဲရှိ သူအားလုံးဆီ ပို့မည်
+        io.to(channelName).emit('update_user_list', { users: channelUsers[channelName] });
+
+        // Active Speaker အခြေအနေ ပို့မည်
         if (activeSpeakers[channelName]) {
           socket.emit('floor_status', { isBusy: true, speaker: activeSpeakers[channelName] });
         } else {
@@ -57,23 +60,13 @@ io.on('connection', (socket) => {
         }
 
       } else {
-        // Password မှားယွင်းပါက သို့မဟုတ် Channel မရှိပါက ငြင်းပယ်မည်
-        socket.emit('join_result', {
-          success: false,
-          message: "Invalid Channel Name or Password!"
-        });
+        socket.emit('join_result', { success: false, message: "Invalid Channel or Password!" });
       }
-
     } catch (err) {
       console.error(err);
-      socket.emit('join_result', {
-        success: false,
-        message: "Server internal error!"
-      });
     }
   });
 
-  // စကားစပြောရန် တောင်းဆိုခြင်း (Push-to-Talk)
   socket.on('request_talk', (data) => {
     const channelName = data.channelName;
     const username = data.username;
@@ -81,20 +74,18 @@ io.on('connection', (socket) => {
     if (!activeSpeakers[channelName]) {
       activeSpeakers[channelName] = username;
       socket.emit('talk_granted');
-      socket.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
+      io.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
     } else {
       socket.emit('talk_denied');
     }
   });
 
-  // စကားပြောပြီး၍ ခလုတ်လွှတ်လိုက်ခြင်း
   socket.on('stop_talk', (data) => {
     const channelName = data.channelName;
     delete activeSpeakers[channelName];
     io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
   });
 
-  // အသံ Data ပို့ခြင်း
   socket.on('send_audio', (data) => {
     try {
       if (data && data.channelName) {
@@ -111,11 +102,16 @@ io.on('connection', (socket) => {
         delete activeSpeakers[room];
         io.to(room).emit('floor_status', { isBusy: false, speaker: "" });
       }
+
+      if (channelUsers[room] && socket.username) {
+        channelUsers[room] = channelUsers[room].filter(u => u !== socket.username);
+        io.to(room).emit('update_user_list', { users: channelUsers[room] });
+      }
     }
   });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`>>> Audio Server running on port ${PORT}`);
+  console.log(`>>> Server running on port ${PORT}`);
 });
