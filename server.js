@@ -2,15 +2,14 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const admin = require('firebase-admin'); // 1. Firebase Admin ကို Import လုပ်ပါ
+const admin = require('firebase-admin');
 
 const app = express();
 app.use(cors());
 
-// 2. Firebase Admin SDK ကို Initialize လုပ်ခြင်း
-// (မှတ်ချက်: Firebase Console > Project Settings > Service Accounts ထဲကနေ ဒေါင်းလုဒ်ဆွဲထားတဲ့ JSON ဖိုင် နာမည် ထည့်ပေးရပါမယ်)
+// Firebase Admin SDK ကို Initialize လုပ်ခြင်း
 try {
-  const serviceAccount = require('./serviceAccountKey.json'); // မင်းရဲ့ Service Account Key ဖိုင်လမ်းကြောင်း
+  const serviceAccount = require('./serviceAccountKey.json');
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
@@ -33,8 +32,8 @@ const CHANNELS = {
 };
 
 const activeSpeakers = {};
-const channelUsers = {}; // Channel အလိုက် Online ရှိသူများ
-const userFcmTokens = {}; // User တစ်ယောက်ချင်းစီရဲ့ FCM Token များကို သိမ်းဆည်းရန် Object
+const channelUsers = {}; 
+const userFcmTokens = {}; 
 
 app.get('/', (req, res) => {
   res.send("Walkie-Talkie Audio Server with FCM Push Notifications is Running!");
@@ -42,21 +41,24 @@ app.get('/', (req, res) => {
 
 io.on('connection', (socket) => {
 
-  // User ရဲ့ FCM Token သိမ်းဆည်းခြင်း Event
+  // FCM Token သိမ်းဆည်းခြင်း Event
   socket.on('register_fcm_token', (data) => {
-    if (data && data.username && data.fcmToken) {
-      userFcmTokens[data.username] = data.fcmToken;
-      console.log(`Registered FCM Token for ${data.username}`);
+    try {
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      if (parsedData && parsedData.username && parsedData.fcmToken) {
+        userFcmTokens[parsedData.username] = parsedData.fcmToken;
+        console.log(`Registered FCM Token for ${parsedData.username}`);
+      }
+    } catch (err) {
+      console.error('Error in register_fcm_token:', err);
     }
   });
 
   // Channel ထဲသို့ ဝင်ရောက်ခြင်း
   socket.on('join_channel', (data) => {
     try {
-      const channelName = data.channelName;
-      const password = data.password;
-      const username = data.username;
-      const fcmToken = data.fcmToken; // App ဘက်က FCM Token ပါ ပို့ပေးရပါမယ်
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const { channelName, password, username, fcmToken } = parsedData;
 
       if (CHANNELS[channelName] && CHANNELS[channelName] === password) {
         socket.join(channelName);
@@ -87,14 +89,14 @@ io.on('connection', (socket) => {
         socket.emit('join_result', { success: false, message: "Invalid Channel or Password!" });
       }
     } catch (err) {
-      console.error(err);
+      console.error('Error in join_channel:', err);
     }
   });
 
   // စကားပြောခွင့် တောင်းဆိုခြင်း
   socket.on('request_talk', (data) => {
-    const channelName = data.channelName;
-    const username = data.username;
+    const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+    const { channelName, username } = parsedData;
 
     if (!activeSpeakers[channelName]) {
       activeSpeakers[channelName] = username;
@@ -107,7 +109,8 @@ io.on('connection', (socket) => {
 
   // စကားပြောခြင်း ရပ်တန့်ခြင်း
   socket.on('stop_talk', (data) => {
-    const channelName = data.channelName;
+    const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+    const channelName = parsedData.channelName;
     delete activeSpeakers[channelName];
     io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
   });
@@ -115,35 +118,37 @@ io.on('connection', (socket) => {
   // Audio Streaming ပို့ပေးခြင်း
   socket.on('send_audio', (data) => {
     try {
-      if (data && data.channelName) {
-        socket.to(data.channelName).emit('receive_audio', data);
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      if (parsedData && parsedData.channelName) {
+        socket.to(parsedData.channelName).emit('receive_audio', parsedData);
       }
     } catch (err) {
       console.error(err);
     }
   });
 
-  // 💌 FCM Push Notification ဖြင့် စာ/Nudge ပို့သည့် အဓိက အပိုင်း
+  // 💌 FCM Push Notification ဖြင့် Nudge ပို့သည့် အဓိက အပိုင်း
   socket.on('send_nudge_notification', async (data) => {
     try {
-      const { channelName, targetUser, fromUser, targetFcmToken } = data;
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const { channelName, targetUser, fromUser, targetFcmToken } = parsedData;
 
-      // Socket Online ရှိနေသူများအတွက် Socket တိုက်ရိုက်ပို့ခြင်း
-      socket.to(channelName).emit('receive_nudge', {
+      // Socket Online ရှိနေသူများအတွက် Socket နာမည် (MainActivity.kt ထဲက receive_nudge_notification နဲ့ ကိုက်အောင် ပြင်ထားပါတယ်)
+      socket.to(channelName).emit('receive_nudge_notification', {
         targetUser: targetUser,
         fromUser: fromUser,
-        message: `${fromUser} က သင့်ကို စကားပြောချင်လို့ ခေါ်နေပါတယ်! 💌`
+        channelName: channelName
       });
 
-      // App ပိတ်ထားသူ/Offline ဖြစ်နေသူများအတွက် FCM Push Notification လှမ်းပို့ပေးခြင်း
+      // App ပိတ်ထားသူ/Offline ဖြစ်နေသူများအတွက် FCM Push Notification
       const tokenToSend = targetFcmToken || userFcmTokens[targetUser];
 
       if (tokenToSend) {
         const payload = {
           token: tokenToSend,
           notification: {
-            title: "WTalk Walkie-Talkie 🎙️",
-            body: `${fromUser} က သင့်ကို ${channelName} တွင် ခေါ်နေပါတယ်!`
+            title: "WTalk Notification 💌",
+            body: `${fromUser} is calling you on channel ${channelName}!`
           },
           data: {
             channelName: channelName || "",
@@ -151,7 +156,7 @@ io.on('connection', (socket) => {
             type: "nudge"
           },
           android: {
-            priority: "high", // High Priority ထည့်မှ App ပိတ်ထားချိန် Noti ပေါ်မည်
+            priority: "high",
             notification: {
               sound: "default",
               channelId: "wtalk_nudge_channel",
