@@ -55,7 +55,7 @@ io.on('connection', (socket) => {
   });
 
   // Channel ထဲသို့ ဝင်ရောက်ခြင်း
-  socket.on('join_channel', (data) => {
+  socket.on('join_channel', async (data) => {
     try {
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
       const { channelName, password, username, fcmToken } = parsedData;
@@ -67,6 +67,14 @@ io.on('connection', (socket) => {
 
         if (fcmToken) {
           userFcmTokens[username] = fcmToken;
+
+          // FCM Topic သို့ Auto Subscribe လုပ်ပေးခြင်း (Token ပျောက်သွားရင်တောင် Topic နဲ့ မပျောက်အောင်)
+          try {
+            await admin.messaging().subscribeToTopic(fcmToken, channelName);
+            console.log(`Subscribed ${username} to FCM Topic: ${channelName}`);
+          } catch (subErr) {
+            console.error("Error subscribing to topic:", subErr);
+          }
         }
 
         if (!channelUsers[channelName]) {
@@ -133,14 +141,14 @@ io.on('connection', (socket) => {
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
       const { channelName, targetUser, fromUser, targetFcmToken } = parsedData;
 
-      // Socket Online ရှိနေသူများအတွက် Socket နာမည် (MainActivity.kt ထဲက receive_nudge_notification နဲ့ ကိုက်အောင် ပြင်ထားပါတယ်)
+      // Socket Online ရှိနေသူများအတွက် Direct Socket
       socket.to(channelName).emit('receive_nudge_notification', {
         targetUser: targetUser,
         fromUser: fromUser,
         channelName: channelName
       });
 
-      // App ပိတ်ထားသူ/Offline ဖြစ်နေသူများအတွက် FCM Push Notification
+      // App ပိတ်ထားသူ/Offline ဖြစ်နေသူများအတွက် FCM Direct Push Notification
       const tokenToSend = targetFcmToken || userFcmTokens[targetUser];
 
       if (tokenToSend) {
@@ -166,9 +174,34 @@ io.on('connection', (socket) => {
         };
 
         const response = await admin.messaging().send(payload);
-        console.log("Successfully sent FCM Push Notification:", response);
+        console.log("Successfully sent Direct FCM Push Notification:", response);
       } else {
-        console.log(`No FCM token found for user: ${targetUser}`);
+        // Token ရှာမတွေ့ပါက Topic သို့ Broadcast လုပ်သည့် Fallback
+        console.log(`No direct FCM token for ${targetUser}. Sending via Topic fallback...`);
+        
+        const topicPayload = {
+          topic: channelName,
+          notification: {
+            title: "WTalk Notification 💌",
+            body: `${fromUser} is calling on channel ${channelName}!`
+          },
+          data: {
+            channelName: channelName || "",
+            fromUser: fromUser || "",
+            type: "nudge"
+          },
+          android: {
+            priority: "high",
+            notification: {
+              sound: "default",
+              channelId: "wtalk_nudge_channel",
+              priority: "high"
+            }
+          }
+        };
+
+        const topicResponse = await admin.messaging().send(topicPayload);
+        console.log("Successfully sent Topic FCM Push Notification:", topicResponse);
       }
 
     } catch (err) {
