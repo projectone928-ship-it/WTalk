@@ -1,206 +1,143 @@
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const cors = require("cors");
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const admin = require('firebase-admin');
 
 const app = express();
 app.use(cors());
 
+try {
+  const serviceAccount = require('./serviceAccountKey.json');
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount)
+  });
+  console.log(">>> Firebase Admin Initialized Successfully!");
+} catch (error) {
+  console.error(">>> Firebase Admin Init Error:", error.message);
+}
+
 const server = http.createServer(app);
 
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    },
-    pingTimeout: 60000,
-    pingInterval: 25000,
-    maxHttpBufferSize: 1e7
+  cors: { origin: "*", methods: ["GET", "POST"] },
+  maxHttpBufferSize: 1e7,
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 const CHANNELS = {
-    Quarkofficial9: "quarkmemberonly9"
+  "Quarkofficial9": "quarkmemberonly9"
 };
 
-// channel တစ်ခုစီရဲ့ speaker
 const activeSpeakers = {};
+const channelUsers = {}; // Channel တစ်ခုချင်းစီအလိုက် Online ရှိနေသူများ စာရင်း
 
-// socket.id => user info
-const clients = {};
-
-app.get("/", (req, res) => {
-    res.send("WTalk server running");
+app.get('/', (req, res) => {
+  res.send("Walkie-Talkie Audio Server is Running!");
 });
 
-io.on("connection", (socket) => {
+io.on('connection', (socket) => {
 
-    console.log("CONNECTED:", socket.id);
+  socket.on('join_channel', async (data) => {
+    try {
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const { channelName, password, username, fcmToken } = parsedData;
 
-    socket.on("join_channel", (data) => {
+      if (CHANNELS[channelName] && CHANNELS[channelName] === password) {
+        socket.join(channelName);
+        socket.username = username;
+        socket.channelName = channelName;
 
-        try {
-
-            const {
-                channelName,
-                password,
-                username
-            } = data;
-
-            if (!CHANNELS[channelName]) {
-
-                socket.emit("join_result", {
-                    success: false,
-                    message: "Channel not found"
-                });
-
-                return;
-            }
-
-            if (CHANNELS[channelName] !== password) {
-
-                socket.emit("join_result", {
-                    success: false,
-                    message: "Wrong password"
-                });
-
-                return;
-            }
-
-            socket.join(channelName);
-
-            clients[socket.id] = {
-                username,
-                channelName,
-                canTalk: false
-            };
-
-            socket.emit("join_result", {
-                success: true,
-                message: `Connected to ${channelName}`
-            });
-
-            const speaker = activeSpeakers[channelName];
-
-            socket.emit("floor_status", {
-                isBusy: !!speaker,
-                speaker: speaker || ""
-            });
-
-            console.log(username + " joined " + channelName);
-
-        } catch (e) {
-
-            console.log(e);
-
-            socket.emit("join_result", {
-                success: false,
-                message: "Join failed"
-            });
-        }
-    });
-
-    socket.on("request_talk", () => {
-
-        const user = clients[socket.id];
-
-        if (!user) return;
-
-        const channelName = user.channelName;
-        const username = user.username;
-
-        if (!activeSpeakers[channelName]) {
-
-            activeSpeakers[channelName] = username;
-
-            user.canTalk = true;
-
-            socket.emit("talk_granted");
-
-            io.to(channelName).emit("floor_status", {
-                isBusy: true,
-                speaker: username
-            });
-
-            console.log(username + " started talking");
-
-        } else {
-
-            socket.emit("talk_denied");
-        }
-    });
-
-    socket.on("send_audio", (data) => {
-
-        const user = clients[socket.id];
-
-        if (!user) return;
-
-        const channelName = user.channelName;
-
-        if (!user.canTalk) {
-            return;
+        if (!channelUsers[channelName]) {
+          channelUsers[channelName] = [];
         }
 
-        if (activeSpeakers[channelName] !== user.username) {
-            return;
-        }
+        // နာမည်တူ တခြားဟာရှိရင် ဖယ်ပြီး အသစ်ထည့်မည် (Duplicate မဖြစ်စေရန်)
+        channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
+        channelUsers[channelName].push(username);
 
-        socket.to(channelName).emit("receive_audio", {
-            username: user.username,
-            audioData: data.audioData
-        });
-    });
+        socket.emit('join_result', { success: true, message: `Connected to ${channelName}` });
 
-    socket.on("stop_talk", () => {
+        // Channel ထဲရှိသူအားလုံးကို Online Users စာရင်း ပို့ပေးမည်
+        io.to(channelName).emit('online_users', channelUsers[channelName]);
 
-        const user = clients[socket.id];
+      } else {
+        socket.emit('join_result', { success: false, message: "Invalid Channel or Password!" });
+      }
+    } catch (err) {
+      console.error('Error in join_channel:', err);
+    }
+  });
 
-        if (!user) return;
+  socket.on('request_talk', (data) => {
+    try {
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const channelName = parsedData.channelName || socket.channelName;
+      const username = parsedData.username || socket.username;
 
-        const channelName = user.channelName;
+      if (!channelName) return;
 
-        if (activeSpeakers[channelName] === user.username) {
+      if (!activeSpeakers[channelName] || activeSpeakers[channelName] === username) {
+        activeSpeakers[channelName] = username;
+        socket.emit('talk_granted');
+        io.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
+      } else {
+        socket.emit('talk_denied');
+      }
+    } catch (err) {
+      console.error('Error in request_talk:', err);
+    }
+  });
 
-            delete activeSpeakers[channelName];
+  socket.on('stop_talk', (data) => {
+    try {
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const channelName = parsedData.channelName || socket.channelName;
 
-            user.canTalk = false;
+      if (channelName && activeSpeakers[channelName] === socket.username) {
+        delete activeSpeakers[channelName];
+        io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
+      }
+    } catch (err) {
+      console.error('Error in stop_talk:', err);
+    }
+  });
 
-            io.to(channelName).emit("floor_status", {
-                isBusy: false,
-                speaker: ""
-            });
+  socket.on('send_audio', (data) => {
+    try {
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const channelName = parsedData.channelName || socket.channelName;
 
-            console.log(user.username + " stopped talking");
-        }
-    });
+      if (channelName && activeSpeakers[channelName] === socket.username) {
+        socket.to(channelName).emit('receive_audio', parsedData);
+      }
+    } catch (err) {
+      console.error('Error in send_audio:', err);
+    }
+  });
 
-    socket.on("disconnect", () => {
+  socket.on('disconnecting', () => {
+    const channelName = socket.channelName;
+    const username = socket.username;
 
-        const user = clients[socket.id];
+    if (channelName) {
+      if (activeSpeakers[channelName] === username) {
+        delete activeSpeakers[channelName];
+        io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
+      }
 
-        if (user) {
-
-            const channelName = user.channelName;
-
-            if (activeSpeakers[channelName] === user.username) {
-
-                delete activeSpeakers[channelName];
-
-                io.to(channelName).emit("floor_status", {
-                    isBusy: false,
-                    speaker: ""
-                });
-            }
-
-            delete clients[socket.id];
-
-            console.log(user.username + " disconnected");
-        }
-    });
+      if (channelUsers[channelName] && username) {
+        // ထွက်သွားသူကို Online List ထဲမှ ဖယ်ထုတ်မည်
+        channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
+        // ကျန်ရှိနေသူများကို Online Users စာရင်း အသစ်ပြန်ပို့မည်
+        io.to(channelName).emit('online_users', channelUsers[channelName]);
+      }
+    }
+  });
 });
 
 const PORT = process.env.PORT || 3000;
-
 server.listen(PORT, () => {
-    console.log("Server running on port " + PORT);
+  console.log(`>>> Server running on port ${PORT}`);
 });
