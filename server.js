@@ -22,11 +22,12 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 1e8,
+  maxHttpBufferSize: 1e7, // 10MB (Audio Streaming အတွက် လုံလောက်ပါသည်)
   pingTimeout: 60000,
   pingInterval: 25000
 });
 
+// Hardcoded Channels Passwords
 const CHANNELS = {
   "Quarkofficial9": "quarkmemberonly9"
 };
@@ -41,7 +42,7 @@ app.get('/', (req, res) => {
 
 io.on('connection', (socket) => {
 
-  // FCM Token သိမ်းဆည်းခြင်း Event
+  // 1. FCM Token သိမ်းဆည်းခြင်း Event
   socket.on('register_fcm_token', (data) => {
     try {
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
@@ -54,7 +55,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Channel ထဲသို့ ဝင်ရောက်ခြင်း
+  // 2. Channel ထဲသို့ ဝင်ရောက်ခြင်း
   socket.on('join_channel', async (data) => {
     try {
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
@@ -68,12 +69,12 @@ io.on('connection', (socket) => {
         if (fcmToken) {
           userFcmTokens[username] = fcmToken;
 
-          // FCM Topic သို့ Auto Subscribe လုပ်ပေးခြင်း (Token ပျောက်သွားရင်တောင် Topic နဲ့ မပျောက်အောင်)
+          // FCM Topic သို့ Auto Subscribe လုပ်ပေးခြင်း
           try {
             await admin.messaging().subscribeToTopic(fcmToken, channelName);
             console.log(`Subscribed ${username} to FCM Topic: ${channelName}`);
           } catch (subErr) {
-            console.error("Error subscribing to topic:", subErr);
+            console.error("Error subscribing to topic:", subErr.message);
           }
         }
 
@@ -81,12 +82,14 @@ io.on('connection', (socket) => {
           channelUsers[channelName] = [];
         }
 
+        // Duplicate username များရှင်းထုတ်ခြင်း
         channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
         channelUsers[channelName].push(username);
 
         socket.emit('join_result', { success: true, message: `Connected to ${channelName}` });
         io.to(channelName).emit('online_users', channelUsers[channelName]);
 
+        // လက်ရှိ စကားပြောနေသူ ရှိမရှိ အကြောင်းကြားမည်
         if (activeSpeakers[channelName]) {
           socket.emit('floor_status', { isBusy: true, speaker: activeSpeakers[channelName] });
         } else {
@@ -101,47 +104,65 @@ io.on('connection', (socket) => {
     }
   });
 
-  // စကားပြောခွင့် တောင်းဆိုခြင်း
+  // 3. စကားပြောခွင့် တောင်းဆိုခြင်း (Floor Control)
   socket.on('request_talk', (data) => {
-    const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-    const { channelName, username } = parsedData;
+    try {
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const channelName = parsedData.channelName || socket.channelName;
+      const username = parsedData.username || socket.username;
 
-    if (!activeSpeakers[channelName]) {
-      activeSpeakers[channelName] = username;
-      socket.emit('talk_granted');
-      io.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
-    } else {
-      socket.emit('talk_denied');
+      if (!channelName) return;
+
+      if (!activeSpeakers[channelName] || activeSpeakers[channelName] === username) {
+        activeSpeakers[channelName] = username;
+        socket.emit('talk_granted');
+        io.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
+      } else {
+        socket.emit('talk_denied');
+      }
+    } catch (err) {
+      console.error('Error in request_talk:', err);
     }
   });
 
-  // စကားပြောခြင်း ရပ်တန့်ခြင်း
+  // 4. စကားပြောခြင်း ရပ်တန့်ခြင်း
   socket.on('stop_talk', (data) => {
-    const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-    const channelName = parsedData.channelName;
-    delete activeSpeakers[channelName];
-    io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
+    try {
+      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
+      const channelName = parsedData.channelName || socket.channelName;
+
+      // ပြောနေသူကိုယ်တိုင် လွှတ်မှသာ Floor လွတ်မည်
+      if (channelName && activeSpeakers[channelName] === socket.username) {
+        delete activeSpeakers[channelName];
+        io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
+      }
+    } catch (err) {
+      console.error('Error in stop_talk:', err);
+    }
   });
 
-  // Audio Streaming ပို့ပေးခြင်း
+  // 5. Audio Streaming ပို့ပေးခြင်း (Floor Validation ထည့်သွင်းထားပါသည်)
   socket.on('send_audio', (data) => {
     try {
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-      if (parsedData && parsedData.channelName) {
-        socket.to(parsedData.channelName).emit('receive_audio', parsedData);
+      const channelName = parsedData.channelName || socket.channelName;
+
+      // စကားပြောခွင့် ရထားသူတစ်ဦးတည်း၏ Audio ကိုသာ Relay လုပ်ပေးမည်
+      if (channelName && activeSpeakers[channelName] === socket.username) {
+        socket.to(channelName).emit('receive_audio', parsedData);
       }
     } catch (err) {
-      console.error(err);
+      console.error('Error in send_audio:', err);
     }
   });
 
-  // 💌 FCM Push Notification ဖြင့် Nudge ပို့သည့် အဓိက အပိုင်း
+  // 6. FCM Push Notification ဖြင့် Nudge ပို့သည့် အဓိက အပိုင်း
   socket.on('send_nudge_notification', async (data) => {
     try {
       const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
       const { channelName, targetUser, fromUser, targetFcmToken } = parsedData;
 
-      // Socket Online ရှိနေသူများအတွက် Direct Socket
+      // Socket Online ရှိနေသူများအတွက် Direct Socket Event လွှတ်မည်
       socket.to(channelName).emit('receive_nudge_notification', {
         targetUser: targetUser,
         fromUser: fromUser,
@@ -151,7 +172,7 @@ io.on('connection', (socket) => {
       // App ပိတ်ထားသူ/Offline ဖြစ်နေသူများအတွက် FCM Direct Push Notification
       const tokenToSend = targetFcmToken || userFcmTokens[targetUser];
 
-      if (tokenToSend) {
+      if (tokenToSend && admin.apps.length > 0) {
         const payload = {
           token: tokenToSend,
           notification: {
@@ -175,7 +196,7 @@ io.on('connection', (socket) => {
 
         const response = await admin.messaging().send(payload);
         console.log("Successfully sent Direct FCM Push Notification:", response);
-      } else {
+      } else if (admin.apps.length > 0) {
         // Token ရှာမတွေ့ပါက Topic သို့ Broadcast လုပ်သည့် Fallback
         console.log(`No direct FCM token for ${targetUser}. Sending via Topic fallback...`);
         
@@ -209,12 +230,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  // User ထွက်သွားပါက စာရင်းမှ ဖျက်ခြင်း
+  // 7. User ထွက်သွားပါက စာရင်းမှ ဖျက်ခြင်း
   socket.on('disconnecting', () => {
     const channelName = socket.channelName;
     const username = socket.username;
 
     if (channelName) {
+      // ပြောလက်စလူ ထွက်သွားပါက Floor Free ပေးမည်
       if (activeSpeakers[channelName] === username) {
         delete activeSpeakers[channelName];
         io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
@@ -232,3 +254,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`>>> Server running on port ${PORT}`);
 });
+      
