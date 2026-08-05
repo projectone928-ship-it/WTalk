@@ -1,257 +1,206 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-const admin = require('firebase-admin');
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const cors = require("cors");
 
 const app = express();
 app.use(cors());
 
-// Firebase Admin SDK ကို Initialize လုပ်ခြင်း
-try {
-  const serviceAccount = require('./serviceAccountKey.json');
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
-  console.log(">>> Firebase Admin Initialized Successfully!");
-} catch (error) {
-  console.error(">>> Firebase Admin Init Error (serviceAccountKey.json ရှိမရှိ စစ်ပါ):", error.message);
-}
-
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 1e7, // 10MB (Audio Streaming အတွက် လုံလောက်ပါသည်)
-  pingTimeout: 60000,
-  pingInterval: 25000
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"]
+    },
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    maxHttpBufferSize: 1e7
 });
 
-// Hardcoded Channels Passwords
 const CHANNELS = {
-  "Quarkofficial9": "quarkmemberonly9"
+    Quarkofficial9: "quarkmemberonly9"
 };
 
+// channel တစ်ခုစီရဲ့ speaker
 const activeSpeakers = {};
-const channelUsers = {}; 
-const userFcmTokens = {}; 
 
-app.get('/', (req, res) => {
-  res.send("Walkie-Talkie Audio Server with FCM Push Notifications is Running!");
+// socket.id => user info
+const clients = {};
+
+app.get("/", (req, res) => {
+    res.send("WTalk server running");
 });
 
-io.on('connection', (socket) => {
+io.on("connection", (socket) => {
 
-  // 1. FCM Token သိမ်းဆည်းခြင်း Event
-  socket.on('register_fcm_token', (data) => {
-    try {
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-      if (parsedData && parsedData.username && parsedData.fcmToken) {
-        userFcmTokens[parsedData.username] = parsedData.fcmToken;
-        console.log(`Registered FCM Token for ${parsedData.username}`);
-      }
-    } catch (err) {
-      console.error('Error in register_fcm_token:', err);
-    }
-  });
+    console.log("CONNECTED:", socket.id);
 
-  // 2. Channel ထဲသို့ ဝင်ရောက်ခြင်း
-  socket.on('join_channel', async (data) => {
-    try {
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-      const { channelName, password, username, fcmToken } = parsedData;
+    socket.on("join_channel", (data) => {
 
-      if (CHANNELS[channelName] && CHANNELS[channelName] === password) {
-        socket.join(channelName);
-        socket.username = username;
-        socket.channelName = channelName;
+        try {
 
-        if (fcmToken) {
-          userFcmTokens[username] = fcmToken;
+            const {
+                channelName,
+                password,
+                username
+            } = data;
 
-          // FCM Topic သို့ Auto Subscribe လုပ်ပေးခြင်း
-          try {
-            await admin.messaging().subscribeToTopic(fcmToken, channelName);
-            console.log(`Subscribed ${username} to FCM Topic: ${channelName}`);
-          } catch (subErr) {
-            console.error("Error subscribing to topic:", subErr.message);
-          }
+            if (!CHANNELS[channelName]) {
+
+                socket.emit("join_result", {
+                    success: false,
+                    message: "Channel not found"
+                });
+
+                return;
+            }
+
+            if (CHANNELS[channelName] !== password) {
+
+                socket.emit("join_result", {
+                    success: false,
+                    message: "Wrong password"
+                });
+
+                return;
+            }
+
+            socket.join(channelName);
+
+            clients[socket.id] = {
+                username,
+                channelName,
+                canTalk: false
+            };
+
+            socket.emit("join_result", {
+                success: true,
+                message: `Connected to ${channelName}`
+            });
+
+            const speaker = activeSpeakers[channelName];
+
+            socket.emit("floor_status", {
+                isBusy: !!speaker,
+                speaker: speaker || ""
+            });
+
+            console.log(username + " joined " + channelName);
+
+        } catch (e) {
+
+            console.log(e);
+
+            socket.emit("join_result", {
+                success: false,
+                message: "Join failed"
+            });
         }
+    });
 
-        if (!channelUsers[channelName]) {
-          channelUsers[channelName] = [];
-        }
+    socket.on("request_talk", () => {
 
-        // Duplicate username များရှင်းထုတ်ခြင်း
-        channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
-        channelUsers[channelName].push(username);
+        const user = clients[socket.id];
 
-        socket.emit('join_result', { success: true, message: `Connected to ${channelName}` });
-        io.to(channelName).emit('online_users', channelUsers[channelName]);
+        if (!user) return;
 
-        // လက်ရှိ စကားပြောနေသူ ရှိမရှိ အကြောင်းကြားမည်
-        if (activeSpeakers[channelName]) {
-          socket.emit('floor_status', { isBusy: true, speaker: activeSpeakers[channelName] });
+        const channelName = user.channelName;
+        const username = user.username;
+
+        if (!activeSpeakers[channelName]) {
+
+            activeSpeakers[channelName] = username;
+
+            user.canTalk = true;
+
+            socket.emit("talk_granted");
+
+            io.to(channelName).emit("floor_status", {
+                isBusy: true,
+                speaker: username
+            });
+
+            console.log(username + " started talking");
+
         } else {
-          socket.emit('floor_status', { isBusy: false, speaker: "" });
+
+            socket.emit("talk_denied");
+        }
+    });
+
+    socket.on("send_audio", (data) => {
+
+        const user = clients[socket.id];
+
+        if (!user) return;
+
+        const channelName = user.channelName;
+
+        if (!user.canTalk) {
+            return;
         }
 
-      } else {
-        socket.emit('join_result', { success: false, message: "Invalid Channel or Password!" });
-      }
-    } catch (err) {
-      console.error('Error in join_channel:', err);
-    }
-  });
+        if (activeSpeakers[channelName] !== user.username) {
+            return;
+        }
 
-  // 3. စကားပြောခွင့် တောင်းဆိုခြင်း (Floor Control)
-  socket.on('request_talk', (data) => {
-    try {
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-      const channelName = parsedData.channelName || socket.channelName;
-      const username = parsedData.username || socket.username;
+        socket.to(channelName).emit("receive_audio", {
+            username: user.username,
+            audioData: data.audioData
+        });
+    });
 
-      if (!channelName) return;
+    socket.on("stop_talk", () => {
 
-      if (!activeSpeakers[channelName] || activeSpeakers[channelName] === username) {
-        activeSpeakers[channelName] = username;
-        socket.emit('talk_granted');
-        io.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
-      } else {
-        socket.emit('talk_denied');
-      }
-    } catch (err) {
-      console.error('Error in request_talk:', err);
-    }
-  });
+        const user = clients[socket.id];
 
-  // 4. စကားပြောခြင်း ရပ်တန့်ခြင်း
-  socket.on('stop_talk', (data) => {
-    try {
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-      const channelName = parsedData.channelName || socket.channelName;
+        if (!user) return;
 
-      // ပြောနေသူကိုယ်တိုင် လွှတ်မှသာ Floor လွတ်မည်
-      if (channelName && activeSpeakers[channelName] === socket.username) {
-        delete activeSpeakers[channelName];
-        io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
-      }
-    } catch (err) {
-      console.error('Error in stop_talk:', err);
-    }
-  });
+        const channelName = user.channelName;
 
-  // 5. Audio Streaming ပို့ပေးခြင်း (Floor Validation ထည့်သွင်းထားပါသည်)
-  socket.on('send_audio', (data) => {
-    try {
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-      const channelName = parsedData.channelName || socket.channelName;
+        if (activeSpeakers[channelName] === user.username) {
 
-      // စကားပြောခွင့် ရထားသူတစ်ဦးတည်း၏ Audio ကိုသာ Relay လုပ်ပေးမည်
-      if (channelName && activeSpeakers[channelName] === socket.username) {
-        socket.to(channelName).emit('receive_audio', parsedData);
-      }
-    } catch (err) {
-      console.error('Error in send_audio:', err);
-    }
-  });
+            delete activeSpeakers[channelName];
 
-  // 6. FCM Push Notification ဖြင့် Nudge ပို့သည့် အဓိက အပိုင်း
-  socket.on('send_nudge_notification', async (data) => {
-    try {
-      const parsedData = typeof data === 'string' ? JSON.parse(data) : data;
-      const { channelName, targetUser, fromUser, targetFcmToken } = parsedData;
+            user.canTalk = false;
 
-      // Socket Online ရှိနေသူများအတွက် Direct Socket Event လွှတ်မည်
-      socket.to(channelName).emit('receive_nudge_notification', {
-        targetUser: targetUser,
-        fromUser: fromUser,
-        channelName: channelName
-      });
+            io.to(channelName).emit("floor_status", {
+                isBusy: false,
+                speaker: ""
+            });
 
-      // App ပိတ်ထားသူ/Offline ဖြစ်နေသူများအတွက် FCM Direct Push Notification
-      const tokenToSend = targetFcmToken || userFcmTokens[targetUser];
+            console.log(user.username + " stopped talking");
+        }
+    });
 
-      if (tokenToSend && admin.apps.length > 0) {
-        const payload = {
-          token: tokenToSend,
-          notification: {
-            title: "WTalk Notification 💌",
-            body: `${fromUser} is calling you on channel ${channelName}!`
-          },
-          data: {
-            channelName: channelName || "",
-            fromUser: fromUser || "",
-            type: "nudge"
-          },
-          android: {
-            priority: "high",
-            notification: {
-              sound: "default",
-              channelId: "wtalk_nudge_channel",
-              priority: "high"
+    socket.on("disconnect", () => {
+
+        const user = clients[socket.id];
+
+        if (user) {
+
+            const channelName = user.channelName;
+
+            if (activeSpeakers[channelName] === user.username) {
+
+                delete activeSpeakers[channelName];
+
+                io.to(channelName).emit("floor_status", {
+                    isBusy: false,
+                    speaker: ""
+                });
             }
-          }
-        };
 
-        const response = await admin.messaging().send(payload);
-        console.log("Successfully sent Direct FCM Push Notification:", response);
-      } else if (admin.apps.length > 0) {
-        // Token ရှာမတွေ့ပါက Topic သို့ Broadcast လုပ်သည့် Fallback
-        console.log(`No direct FCM token for ${targetUser}. Sending via Topic fallback...`);
-        
-        const topicPayload = {
-          topic: channelName,
-          notification: {
-            title: "WTalk Notification 💌",
-            body: `${fromUser} is calling on channel ${channelName}!`
-          },
-          data: {
-            channelName: channelName || "",
-            fromUser: fromUser || "",
-            type: "nudge"
-          },
-          android: {
-            priority: "high",
-            notification: {
-              sound: "default",
-              channelId: "wtalk_nudge_channel",
-              priority: "high"
-            }
-          }
-        };
+            delete clients[socket.id];
 
-        const topicResponse = await admin.messaging().send(topicPayload);
-        console.log("Successfully sent Topic FCM Push Notification:", topicResponse);
-      }
-
-    } catch (err) {
-      console.error("Error sending FCM notification:", err);
-    }
-  });
-
-  // 7. User ထွက်သွားပါက စာရင်းမှ ဖျက်ခြင်း
-  socket.on('disconnecting', () => {
-    const channelName = socket.channelName;
-    const username = socket.username;
-
-    if (channelName) {
-      // ပြောလက်စလူ ထွက်သွားပါက Floor Free ပေးမည်
-      if (activeSpeakers[channelName] === username) {
-        delete activeSpeakers[channelName];
-        io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
-      }
-
-      if (channelUsers[channelName] && username) {
-        channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
-        io.to(channelName).emit('online_users', channelUsers[channelName]);
-      }
-    }
-  });
+            console.log(user.username + " disconnected");
+        }
+    });
 });
 
 const PORT = process.env.PORT || 3000;
+
 server.listen(PORT, () => {
-  console.log(`>>> Server running on port ${PORT}`);
+    console.log("Server running on port " + PORT);
 });
-      
