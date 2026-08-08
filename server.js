@@ -22,16 +22,14 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
-  maxHttpBufferSize: 1e7,
+  maxHttpBufferSize: 1e7, // 10MB Buffer
   pingTimeout: 60000,
   pingInterval: 25000
 });
 
-// Channel Configuration
-const CHANNELS = {
-  "Quarkofficial9": "quarkmemberonly9",
-  "Default_Channel": "default" // Android App အတွက် Default Channel ဖွင့်ပေးထားခြင်း
-};
+// 📍 Hardcoded Channel & Password (အသေ သတ်မှတ်ထားခြင်း)
+const ALLOWED_CHANNEL = "Quarkofficial9";
+const ALLOWED_PASSWORD = "quarkmemberonly9";
 
 // State Trackers
 const activeSpeakers = {};
@@ -53,13 +51,11 @@ function parseData(data) {
   return data;
 }
 
-// Android App နှင့် လိုက်ဖက်အောင် `update_user_list` ဟု Event Name ပြောင်းလဲခြင်း
 function emitUsersList(channelName) {
   if (!channelUsers[channelName]) return;
   
   const currentSpeaker = activeSpeakers[channelName] || "";
 
-  // Online ရှိသူများ၏ Array ဖန်တီးခြင်း
   const usersArray = channelUsers[channelName]
     .filter(username => userPresence[channelName]?.[username]?.online)
     .map(username => ({
@@ -67,7 +63,6 @@ function emitUsersList(channelName) {
       isSpeaking: username === currentSpeaker
     }));
 
-  // Event ၂ ခုစလုံးဖြင့် ပို့ပေးခြင်း (Android App နှင့် Compatibility ရစေရန်)
   io.to(channelName).emit('update_user_list', usersArray);
   io.to(channelName).emit('users_list', { users: usersArray });
 }
@@ -91,10 +86,9 @@ io.on('connection', (socket) => {
 
       const { channelName, password, username } = parsedData;
 
-      // Password မပါပါက သို့မဟုတ် မှန်ကန်ပါက လက်ခံမည်
-      const isValidPassword = !CHANNELS[channelName] || CHANNELS[channelName] === password;
-
-      if (isValidPassword) {
+      // 📍 သတ်မှတ်ထားသော Channel Name နှင့် Password ဟုတ်မဟုတ် စစ်ဆေးခြင်း
+      if (channelName === ALLOWED_CHANNEL && password === ALLOWED_PASSWORD) {
+        
         socket.join(channelName);
         socket.username = username;
         socket.channelName = channelName;
@@ -106,7 +100,6 @@ io.on('connection', (socket) => {
           userPresence[channelName] = {};
         }
 
-        // Duplicate အမည်များကို ရှင်းလင်းခြင်း
         channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
         channelUsers[channelName].push(username);
         userPresence[channelName][username] = { online: true, socketId: socket.id };
@@ -118,18 +111,18 @@ io.on('connection', (socket) => {
           username: username
         });
 
-        // Online Members စာရင်း ပို့ပေးခြင်း
         emitUsersList(channelName);
         emitUserJoined(channelName, username);
 
         console.log(`[JOINED] '${username}' joined channel '${channelName}'`);
 
       } else {
+        // Channel Name (သို့) Password မှားနေပါက ငြင်းပယ်မည်
         socket.emit('join_result', { 
           success: false, 
-          message: "Invalid Channel Name or Password!" 
+          message: "Access Denied: Invalid Channel Name or Password!" 
         });
-        console.log(`[AUTH FAILED] '${username}' failed authentication for '${channelName}'`);
+        console.log(`[AUTH FAILED] '${username}' failed authentication.`);
       }
     } catch (err) {
       console.error('Error in join_channel:', err.message);
@@ -150,7 +143,6 @@ io.on('connection', (socket) => {
         socket.emit('talk_granted');
         io.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
         
-        // စကားပြောသူ ပြောင်းလဲသွားသဖြင့် User List ကို Update လုပ်ပေးခြင်း
         emitUsersList(channelName);
         console.log(`[FLOOR GRANTED] ${username} is speaking in '${channelName}'`);
       } else {
@@ -169,13 +161,12 @@ io.on('connection', (socket) => {
       const parsedData = parseData(data) || {};
       const channelName = parsedData.channelName || socket.channelName;
 
-      if (channelName && activeSpeakers[channelName] === socket.username) {
+      if (channelName && (activeSpeakers[channelName] === socket.username || activeSpeakers[channelName] === parsedData.username)) {
         delete activeSpeakers[channelName];
         io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
         
-        // စကားပြောပြီးသွားသဖြင့် User List ကို Update လုပ်ပေးခြင်း
         emitUsersList(channelName);
-        console.log(`[FLOOR RELEASED] ${socket.username} stopped speaking in '${channelName}'`);
+        console.log(`[FLOOR RELEASED] ${socket.username || parsedData.username} stopped speaking in '${channelName}'`);
       }
     } catch (err) {
       console.error('Error in stop_talk:', err.message);
@@ -189,8 +180,12 @@ io.on('connection', (socket) => {
       if (!parsedData) return;
 
       const channelName = parsedData.channelName || socket.channelName;
+      const sender = parsedData.username || socket.username;
 
-      if (channelName && activeSpeakers[channelName] === socket.username) {
+      if (channelName && activeSpeakers[channelName] === sender) {
+        socket.to(channelName).emit('receive_audio', parsedData);
+      } else if (channelName && !activeSpeakers[channelName]) {
+        activeSpeakers[channelName] = sender;
         socket.to(channelName).emit('receive_audio', parsedData);
       }
     } catch (err) {
@@ -225,4 +220,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`>>> WTALK Server running on port ${PORT}`);
 });
-      
+                                   
