@@ -23,11 +23,11 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*", methods: ["GET", "POST"] },
   maxHttpBufferSize: 1e7, // 10MB Buffer
-  pingTimeout: 60000,
-  pingInterval: 25000
+  pingTimeout: 30000,
+  pingInterval: 10000
 });
 
-// 📍 Hardcoded Channel & Password (အသေ သတ်မှတ်ထားခြင်း)
+// 📍 Hardcoded Channel & Password
 const ALLOWED_CHANNEL = "Quarkofficial9";
 const ALLOWED_PASSWORD = "quarkmemberonly9";
 
@@ -86,7 +86,6 @@ io.on('connection', (socket) => {
 
       const { channelName, password, username } = parsedData;
 
-      // 📍 သတ်မှတ်ထားသော Channel Name နှင့် Password ဟုတ်မဟုတ် စစ်ဆေးခြင်း
       if (channelName === ALLOWED_CHANNEL && password === ALLOWED_PASSWORD) {
         
         socket.join(channelName);
@@ -117,7 +116,6 @@ io.on('connection', (socket) => {
         console.log(`[JOINED] '${username}' joined channel '${channelName}'`);
 
       } else {
-        // Channel Name (သို့) Password မှားနေပါက ငြင်းပယ်မည်
         socket.emit('join_result', { 
           success: false, 
           message: "Access Denied: Invalid Channel Name or Password!" 
@@ -129,7 +127,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 2. Request Floor
+  // 2. Request Floor (စကားပြောခွင့်တောင်းခြင်း)
   socket.on('request_talk', (data) => {
     try {
       const parsedData = parseData(data) || {};
@@ -138,6 +136,7 @@ io.on('connection', (socket) => {
 
       if (!channelName || !username) return;
 
+      // လိုင်းလွတ်နေလျှင် (သို့) မိမိကိုယ်တိုင် ပြောနေခြင်းဖြစ်ပါက ချက်ချင်း ခွင့်ပြုမည်
       if (!activeSpeakers[channelName] || activeSpeakers[channelName] === username) {
         activeSpeakers[channelName] = username;
         socket.emit('talk_granted');
@@ -155,25 +154,28 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 3. Stop Talk
+  // 3. Stop Talk (စကားပြောပြီး၍ လိုင်းပြန်လွှတ်ခြင်း - Busy မကျန်အောင် ပြင်ထားသည်)
   socket.on('stop_talk', (data) => {
     try {
       const parsedData = parseData(data) || {};
       const channelName = parsedData.channelName || socket.channelName;
+      const username = parsedData.username || socket.username;
 
-      if (channelName && (activeSpeakers[channelName] === socket.username || activeSpeakers[channelName] === parsedData.username)) {
-        delete activeSpeakers[channelName];
-        io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
-        
-        emitUsersList(channelName);
-        console.log(`[FLOOR RELEASED] ${socket.username || parsedData.username} stopped speaking in '${channelName}'`);
+      if (channelName) {
+        // Active speaker ဟုတ်မဟုတ် စစ်ပြီး သို့မဟုတ် လိုင်းပွင့်စေရန် အမြဲ Reset လုပ်ပေးမည်
+        if (!activeSpeakers[channelName] || activeSpeakers[channelName] === username) {
+          delete activeSpeakers[channelName];
+          io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
+          emitUsersList(channelName);
+          console.log(`[FLOOR RELEASED] ${username} stopped speaking in '${channelName}'`);
+        }
       }
     } catch (err) {
       console.error('Error in stop_talk:', err.message);
     }
   });
 
-  // 4. Send Audio
+  // 4. Send Audio (အသံဖိုင် Broadcast ပြုလုပ်ခြင်း)
   socket.on('send_audio', (data) => {
     try {
       const parsedData = parseData(data);
@@ -182,10 +184,10 @@ io.on('connection', (socket) => {
       const channelName = parsedData.channelName || socket.channelName;
       const sender = parsedData.username || socket.username;
 
-      if (channelName && activeSpeakers[channelName] === sender) {
-        socket.to(channelName).emit('receive_audio', parsedData);
-      } else if (channelName && !activeSpeakers[channelName]) {
-        activeSpeakers[channelName] = sender;
+      if (channelName && sender) {
+        if (!activeSpeakers[channelName]) {
+          activeSpeakers[channelName] = sender;
+        }
         socket.to(channelName).emit('receive_audio', parsedData);
       }
     } catch (err) {
@@ -220,4 +222,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`>>> WTALK Server running on port ${PORT}`);
 });
-                                   
