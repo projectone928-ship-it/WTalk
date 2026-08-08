@@ -29,14 +29,14 @@ const io = new Server(server, {
 
 // Channel Configuration
 const CHANNELS = {
-  "Quarkofficial9": "quarkmemberonly9"
+  "Quarkofficial9": "quarkmemberonly9",
+  "Default_Channel": "default" // Android App အတွက် Default Channel ဖွင့်ပေးထားခြင်း
 };
 
 // State Trackers
 const activeSpeakers = {};
 const channelUsers = {};
 const userPresence = {};
-const pendingNotifications = {};
 
 app.get('/', (req, res) => {
   res.send("WTALK Walkie-Talkie Audio Server is Running!");
@@ -53,25 +53,29 @@ function parseData(data) {
   return data;
 }
 
-// Emit users list to all users in channel
+// Android App နှင့် လိုက်ဖက်အောင် `update_user_list` ဟု Event Name ပြောင်းလဲခြင်း
 function emitUsersList(channelName) {
   if (!channelUsers[channelName]) return;
   
-  const usersArray = channelUsers[channelName].map(username => ({
-    username: username,
-    isOnline: userPresence[channelName]?.[username]?.online || false
-  }));
+  const currentSpeaker = activeSpeakers[channelName] || "";
 
-  const listData = { users: usersArray };
-  io.to(channelName).emit('users_list', listData);
+  // Online ရှိသူများ၏ Array ဖန်တီးခြင်း
+  const usersArray = channelUsers[channelName]
+    .filter(username => userPresence[channelName]?.[username]?.online)
+    .map(username => ({
+      username: username,
+      isSpeaking: username === currentSpeaker
+    }));
+
+  // Event ၂ ခုစလုံးဖြင့် ပို့ပေးခြင်း (Android App နှင့် Compatibility ရစေရန်)
+  io.to(channelName).emit('update_user_list', usersArray);
+  io.to(channelName).emit('users_list', { users: usersArray });
 }
 
-// Emit user joined to all in channel
 function emitUserJoined(channelName, username) {
   io.to(channelName).emit('user_joined', { username: username });
 }
 
-// Emit user left to all in channel
 function emitUserLeft(channelName, username) {
   io.to(channelName).emit('user_left', { username: username });
 }
@@ -87,8 +91,10 @@ io.on('connection', (socket) => {
 
       const { channelName, password, username } = parsedData;
 
-      // Check channel and password
-      if (CHANNELS[channelName] && CHANNELS[channelName] === password) {
+      // Password မပါပါက သို့မဟုတ် မှန်ကန်ပါက လက်ခံမည်
+      const isValidPassword = !CHANNELS[channelName] || CHANNELS[channelName] === password;
+
+      if (isValidPassword) {
         socket.join(channelName);
         socket.username = username;
         socket.channelName = channelName;
@@ -100,7 +106,7 @@ io.on('connection', (socket) => {
           userPresence[channelName] = {};
         }
 
-        // Remove duplicate
+        // Duplicate အမည်များကို ရှင်းလင်းခြင်း
         channelUsers[channelName] = channelUsers[channelName].filter(u => u !== username);
         channelUsers[channelName].push(username);
         userPresence[channelName][username] = { online: true, socketId: socket.id };
@@ -112,10 +118,8 @@ io.on('connection', (socket) => {
           username: username
         });
 
-        // Emit users list to everyone
+        // Online Members စာရင်း ပို့ပေးခြင်း
         emitUsersList(channelName);
-        
-        // Notify others that user joined
         emitUserJoined(channelName, username);
 
         console.log(`[JOINED] '${username}' joined channel '${channelName}'`);
@@ -145,6 +149,9 @@ io.on('connection', (socket) => {
         activeSpeakers[channelName] = username;
         socket.emit('talk_granted');
         io.to(channelName).emit('floor_status', { isBusy: true, speaker: username });
+        
+        // စကားပြောသူ ပြောင်းလဲသွားသဖြင့် User List ကို Update လုပ်ပေးခြင်း
+        emitUsersList(channelName);
         console.log(`[FLOOR GRANTED] ${username} is speaking in '${channelName}'`);
       } else {
         socket.emit('talk_denied', { 
@@ -165,6 +172,9 @@ io.on('connection', (socket) => {
       if (channelName && activeSpeakers[channelName] === socket.username) {
         delete activeSpeakers[channelName];
         io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
+        
+        // စကားပြောပြီးသွားသဖြင့် User List ကို Update လုပ်ပေးခြင်း
+        emitUsersList(channelName);
         console.log(`[FLOOR RELEASED] ${socket.username} stopped speaking in '${channelName}'`);
       }
     } catch (err) {
@@ -188,71 +198,22 @@ io.on('connection', (socket) => {
     }
   });
 
-  // 5. Send Notification
-  socket.on('send_notification', (data) => {
-    try {
-      const parsedData = parseData(data);
-      if (!parsedData) return;
-
-      const channelName = parsedData.channelName || socket.channelName;
-      const targetUser = parsedData.targetUser || parsedData.targetUsername;
-
-      if (!channelName || !targetUser) return;
-
-      const targetPresence = userPresence[channelName]?.[targetUser];
-      if (targetPresence && !targetPresence.online) {
-        // User is offline - confirm notification
-        socket.emit('notification_sent', {
-          success: true,
-          targetUser: targetUser
-        });
-        console.log(`[NOTIFICATION] '${socket.username}' sent notification to '${targetUser}' (offline)`);
-      } else if (targetPresence && targetPresence.online) {
-        // User is online - send direct message
-        const targetSocket = io.sockets.sockets.get(targetPresence.socketId);
-        if (targetSocket) {
-          targetSocket.emit('notification_received', {
-            from: socket.username,
-            message: `${socket.username} wants to talk with you`
-          });
-          socket.emit('notification_sent', {
-            success: true,
-            targetUser: targetUser
-          });
-          console.log(`[MESSAGE] '${socket.username}' sent message to '${targetUser}' (online)`);
-        }
-      } else {
-        socket.emit('notification_sent', {
-          success: false,
-          targetUser: targetUser
-        });
-      }
-    } catch (err) {
-      console.error('Error in send_notification:', err.message);
-    }
-  });
-
-  // 6. Disconnect Handler
+  // 5. Disconnect Handler
   socket.on('disconnecting', () => {
     const channelName = socket.channelName;
     const username = socket.username;
 
     if (channelName && username) {
-      // Release floor if speaking
       if (activeSpeakers[channelName] === username) {
         delete activeSpeakers[channelName];
         io.to(channelName).emit('floor_status', { isBusy: false, speaker: "" });
       }
 
-      // Update presence
       if (userPresence[channelName] && userPresence[channelName][username]) {
         userPresence[channelName][username].online = false;
       }
 
-      // Notify others user left
       emitUserLeft(channelName, username);
-
-      // Update users list
       emitUsersList(channelName);
 
       console.log(`[DISCONNECTED] '${username}' left channel '${channelName}'`);
