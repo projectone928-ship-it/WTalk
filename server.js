@@ -47,7 +47,7 @@ function parseData(data) {
   return data;
 }
 
-// 📍 အဓိကပြင်ဆင်ထားသော Function (User အားလုံးကို isOnline status နှင့်တကွ ပို့ပေးသည်)
+// 📍 User အားလုံးကို isOnline status နှင့်တကွ ပို့ပေးသော Function
 function emitUsersList(channelName) {
   if (!channelUsers[channelName]) return;
   
@@ -148,6 +148,30 @@ io.on('connection', (socket) => {
       if (!parsedData) return;
       socket.to(parsedData.channelName || socket.channelName).emit('receive_audio', parsedData);
     } catch (err) { console.error('Error in send_audio:', err.message); }
+  });
+
+  // 📍 Offline User ဆီသို့ Nudge (💌) Message ပို့ပေးသည့် Socket Listener
+  socket.on('send_nudge', (data) => {
+    try {
+      const parsedData = parseData(data);
+      if (!parsedData) return;
+
+      const channelName = parsedData.channelName || socket.channelName;
+      const senderUsername = parsedData.senderUsername || socket.username;
+      const targetUsername = parsedData.targetUsername;
+
+      if (channelName && senderUsername && targetUsername) {
+        console.log(`[NUDGE] '${senderUsername}' sent nudge to '${targetUsername}' in '${channelName}'`);
+        
+        // Channel ထဲက အဖွဲ့ဝင်များထံ receive_nudge Event ဖြင့် ပြန်လည် ထုတ်လွှင့်ပေးခြင်း
+        io.to(channelName).emit('receive_nudge', {
+          channelName,
+          senderUsername,
+          targetUsername,
+          message: `Hey.. come back! ${senderUsername} is calling you.`
+        });
+      }
+    } catch (err) { console.error('Error in send_nudge:', err.message); }
   });
 
   socket.on('disconnecting', () => {
