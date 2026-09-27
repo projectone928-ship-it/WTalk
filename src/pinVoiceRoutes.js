@@ -1,14 +1,10 @@
-const fs = require('node:fs');
-const path = require('node:path');
 const express = require('express');
 const multer = require('multer');
 
-function createPinVoiceRouter({ storage, uploadDir, maxBytes = 5 * 1024 * 1024, io }) {
+function createPinVoiceRouter({ storage, maxBytes = 5 * 1024 * 1024, io }) {
   const router = express.Router();
-  const tempDir = path.join(uploadDir, '.tmp');
-  fs.mkdirSync(tempDir, { recursive: true });
   const upload = multer({
-    dest: tempDir,
+    storage: multer.memoryStorage(),
     limits: { fileSize: maxBytes },
     fileFilter: (_req, file, callback) => {
       const allowed = ['audio/ogg', 'audio/opus', 'audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/wav', 'audio/x-wav'];
@@ -25,17 +21,16 @@ function createPinVoiceRouter({ storage, uploadDir, maxBytes = 5 * 1024 * 1024, 
     next();
   }
 
-  router.get('/', requireChannelAccess, (_req, res) => {
-    res.json({ items: storage.listPinVoices(_req.channelName).map(storage.publicVoice) });
+  router.get('/', requireChannelAccess, async (req, res, next) => {
+    try {
+      res.json({ items: await storage.listPinVoices(req.channelName) });
+    } catch (error) { next(error); }
   });
 
-  router.post('/', upload.single('audio'), requireChannelAccess, async (req, res) => {
+  router.post('/', upload.single('audio'), requireChannelAccess, async (req, res, next) => {
     if (!req.file) return res.status(400).json({ error: 'audio file is required' });
     const title = String(req.body.title || '').trim();
-    if (!title) {
-      fs.rmSync(req.file.path, { force: true });
-      return res.status(400).json({ error: 'title is required' });
-    }
+    if (!title) return res.status(400).json({ error: 'title is required' });
     try {
       const item = await storage.createPinVoice({
         channelName: req.channelName,
@@ -47,13 +42,12 @@ function createPinVoiceRouter({ storage, uploadDir, maxBytes = 5 * 1024 * 1024, 
       io?.to(req.channelName).emit('pin_voice_created', { item });
       res.status(201).json({ item });
     } catch (error) {
-      fs.rmSync(req.file.path, { force: true });
       if (error.code === 'PIN_VOICE_EXISTS') return res.status(409).json({ error: error.message });
-      throw error;
+      next(error);
     }
   });
 
-  router.delete('/:id', requireChannelAccess, async (req, res) => {
+  router.delete('/:id', requireChannelAccess, async (req, res, next) => {
     try {
       const deleted = await storage.deletePinVoice({
         id: req.params.id,
@@ -66,34 +60,17 @@ function createPinVoiceRouter({ storage, uploadDir, maxBytes = 5 * 1024 * 1024, 
       res.status(204).end();
     } catch (error) {
       if (error.code === 'PIN_VOICE_FORBIDDEN') return res.status(403).json({ error: error.message });
-      throw error;
+      next(error);
     }
   });
 
-  router.get('/:id/stream', requireChannelAccess, (req, res) => {
-    const voice = storage.getVoice(req.params.id);
-    if (!voice || voice.channelName !== req.channelName) return res.status(404).end();
-    const filePath = storage.absoluteVoicePath(voice);
-    if (!fs.existsSync(filePath)) return res.status(410).json({ error: 'audio file is no longer available' });
-    const size = fs.statSync(filePath).size;
-    const range = req.headers.range;
-    res.setHeader('Content-Type', voice.mimeType);
-    res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Cache-Control', 'private, max-age=60');
-    if (!range) {
-      res.setHeader('Content-Length', size);
-      return fs.createReadStream(filePath).pipe(res);
-    }
-    const match = /bytes=(\d*)-(\d*)/.exec(range);
-    if (!match) return res.status(416).end();
-    const start = match[1] ? Number(match[1]) : 0;
-    const end = match[2] ? Number(match[2]) : size - 1;
-    if (start >= size || end < start) return res.status(416).end();
-    const safeEnd = Math.min(end, size - 1);
-    res.status(206);
-    res.setHeader('Content-Range', `bytes ${start}-${safeEnd}/${size}`);
-    res.setHeader('Content-Length', safeEnd - start + 1);
-    fs.createReadStream(filePath, { start, end: safeEnd }).pipe(res);
+  router.get('/:id/stream', requireChannelAccess, async (req, res, next) => {
+    try {
+      const voice = await storage.getPinVoice(req.params.id);
+      if (!voice || voice.channel_name !== req.channelName) return res.status(404).end();
+      const signedUrl = await storage.createSignedStreamUrl(voice, 120);
+      res.redirect(302, signedUrl);
+    } catch (error) { next(error); }
   });
 
   return router;
