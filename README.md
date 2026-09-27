@@ -1,32 +1,49 @@
-# WTalk server additions
+# WTalk server with Supabase Storage
 
-This folder is a drop-in Node.js backend for the existing Android Socket.IO client. It keeps the existing event names (`join_channel`, `update_user_list`, `floor_status`, `talk_granted`, `talk_denied`, `send_audio`, `receive_audio`, and `notify_user`) and adds persistent server-local pinned voice posts.
+This backend keeps the existing Socket.IO events and stores Pin Info voice posts outside Render's ephemeral filesystem:
 
-## What it adds
+- **Audio files:** private Supabase Storage bucket `wtalk-pin-voices`
+- **Metadata and `lastSeenAt`:** Supabase Postgres tables
+- **Playback:** the server creates a 120-second signed URL only when `/stream` is requested
+- **One post per member:** database unique constraint on `(channel_name, username)`
+- **7-day cleanup:** hourly server job deletes inactive users, metadata, and Storage objects
 
-- Server-local audio files under `UPLOAD_DIR`.
-- Metadata in `DATA_DIR/wtalk-state.json`.
-- One pinned voice post per `(channelName, username)`.
-- A user must delete their existing post before adding a new one.
-- List endpoints return metadata only; audio is sent only when `/stream` is requested.
-- HTTP Range support for streaming playback.
-- `lastSeenAt` is updated at every `join_channel`.
-- Users inactive for seven days are removed hourly; their pinned voice files and metadata are removed too.
+## Supabase setup
 
-## Run locally
+1. Create a Supabase project.
+2. In Storage, create a **private** bucket named `wtalk-pin-voices`.
+3. Open SQL Editor and run `supabase/schema.sql`.
+4. Copy the project URL and the server-only `service_role` key.
+5. Never put the service-role key in the Android app or GitHub source.
 
-```bash
-cd server
-cp .env.example .env
-npm install
-npm start
+## Render environment variables
+
+Set these in Render → Service → Environment:
+
+```text
+SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVER_ONLY_SERVICE_ROLE_KEY
+SUPABASE_STORAGE_BUCKET=wtalk-pin-voices
+INACTIVE_USER_DAYS=7
+MAX_PIN_AUDIO_BYTES=5242880
+MAX_PIN_AUDIO_SECONDS=60
+CORS_ORIGIN=*
 ```
 
-The Android app currently points at `https://wtalk-n120.onrender.com`. Deploy this server to that hostname (or change the app URL in `MainActivity.kt` and `WalkieService.kt`). The server-local storage policy means files can be lost if the host wipes its filesystem during a redeploy or restart; use a persistent disk if the hosting provider offers one.
+The service-role key is a secret. Put it in Render environment variables, not in `.env`, GitHub, or the Android app.
+
+## Deploy
+
+Set the Render service root directory to `server/` (or deploy this folder as its own repository), then use:
+
+```text
+Build Command: npm install
+Start Command: npm start
+```
+
+The Render filesystem is no longer used for permanent voice files. Multer only holds the current upload in memory for the request, then the server uploads it to Supabase Storage.
 
 ## API
-
-All requests identify the caller with `channelName` and `username`. The current Android client has no authentication token, so this is compatible with the existing app but should be upgraded with signed authentication before public production use.
 
 ```text
 GET    /health
@@ -36,8 +53,4 @@ DELETE /api/pin-voices/:id?channelName=...&username=...
 GET    /api/pin-voices/:id/stream?channelName=...&username=...
 ```
 
-For delete, the owner may delete their own post. An admin integration may additionally send `x-wtalk-admin: true` after adding real admin authentication.
-
-## Socket events for the Android feature
-
-The server emits `pin_voice_list` immediately after a successful `join_channel`, and emits `pin_voice_created` / `pin_voice_deleted` to the channel when the REST endpoints change the list. The Android Pin Info UI should load metadata on join, upload only after recording and title confirmation, and create an audio player only after Play is pressed.
+The Android Pin Info UI can keep using the same endpoints. It receives metadata only when listing; Play requests `/stream`, which redirects to a short-lived signed Supabase URL.
