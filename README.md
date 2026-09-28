@@ -1,55 +1,32 @@
-# WTalk simple Socket.IO server
+# WTalk Socket.IO server
 
-This is the basic live Push-to-Talk server. It does **not** use Render local disk, Supabase, a database, or voice-file storage.
+This server implements the event contract used by the Android app, including reliable offline-user notifications.
 
-It provides:
+## Offline notification flow
 
-- Socket.IO channel join and online user list
-- One-speaker floor control
-- Low-latency `send_audio` relay between connected users
-- `notify_user` for Come Back/notification behavior
-- `/health` endpoint
+1. An Android client in the background emits `register_notification` with `channelName`, `password`, and `username`.
+2. The sender emits `notify_user` with `targetUsername`, `senderUsername`, `channelName`, `title`, and `message`.
+3. If the recipient is connected in notification mode, the server emits `offline_notification` immediately.
+4. If the recipient is not connected, the server queues up to 50 messages per username in `data/offline-notifications.json`.
+5. On the recipient's next `register_notification`, queued messages are delivered and removed.
 
-All channel and online-user state is held in RAM. A restart or deploy clears the live channel list; users can reconnect normally. No Pin Info voice-post API is included in this simple server.
+## Run
 
-## Render settings
+```bash
+npm install
+npm start
+```
 
-For a server-only GitHub repository:
+Set `PORT` to change the port. Set `WTALK_STORE` to use another queue file location.
+
+## Android endpoint
+
+Update both `MainActivity.kt` and `WalkieService.kt` from:
 
 ```text
-Root Directory: leave empty
-Build Command: npm install
-Start Command: npm start
+https://wtalk-n120.onrender.com
 ```
 
-For a full Android repository with this folder at `server/`:
+to the deployed server URL, then rebuild the Android app.
 
-```text
-Root Directory: server
-Build Command: npm install
-Start Command: npm start
-```
-
-Optional environment variables:
-
-```text
-PORT=10000
-HOST=0.0.0.0
-CORS_ORIGIN=*
-```
-
-Render supplies `PORT` automatically, so it is normally not necessary to add it manually.
-
-## Health check
-
-After deployment, open:
-
-```text
-https://YOUR-RENDER-URL.onrender.com/health
-```
-
-Expected response:
-
-```json
-{"ok":true,"service":"wtalk-server"}
-```
+The server must be deployed with a persistent disk or external database if queued notifications must survive a server restart. The included JSON store is suitable for a single-instance deployment with persistent storage.
