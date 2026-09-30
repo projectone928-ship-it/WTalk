@@ -77,15 +77,18 @@ const io = new Server(httpServer, {
 });
 
 const onlineUsers = new Map(); // username -> { socketId, channelName, socket }
-const socketUsers = new Map(); // socketId -> { username, channelName }
-const channels = new Map(); // channelName -> Map<username, socketId>
+const socketUsers = new Map(); // socketId -> { username, channelName, notificationOnly }
+const notificationSockets = new Map(); // username -> { socket, channelName }
+// channelName -> Map<username, { socketId: string|null, notificationOnly: boolean }>
+const channels = new Map();
 
 function broadcastUsers(channelName) {
   const members = channels.get(channelName);
   if (!members) return;
-  const users = Array.from(members.entries()).map(([username, socketId]) => ({
+  const users = Array.from(members.entries()).map(([username, member]) => ({
     username,
-    isOnline: io.sockets.sockets.has(socketId),
+    // Notification-only users remain visible but are deliberately offline.
+    isOnline: !member.notificationOnly && Boolean(member.socketId) && io.sockets.sockets.has(member.socketId),
     isSpeaking: false,
   }));
   io.to(channelName).emit("update_user_list", { users });
@@ -102,6 +105,59 @@ function findUser(username) {
   return onlineUsers.get(clean(username));
 }
 
+function findNotificationSocket(username, channelName) {
+  const entry = notificationSockets.get(clean(username));
+  if (!entry || entry.channelName !== clean(channelName) || !entry.socket.connected) return null;
+  return entry.socket;
+}
+
+function removeActivePresence(socket, keepOfflineMember = false) {
+  const info = socketUsers.get(socket.id);
+  if (!info) return null;
+
+  const current = onlineUsers.get(info.username);
+  if (current && current.socketId === socket.id) onlineUsers.delete(info.username);
+
+  const members = channels.get(info.channelName);
+  if (members && members.get(info.username)?.socketId === socket.id) {
+    if (keepOfflineMember) {
+      members.set(info.username, { socketId: null, notificationOnly: true });
+    } else {
+      members.delete(info.username);
+    }
+  }
+
+  if (members && members.size === 0) channels.delete(info.channelName);
+  return info;
+}
+
+function registerNotificationPresence(socket, username, channelName) {
+  const previous = socketUsers.get(socket.id);
+  if (previous && (previous.username !== username || previous.channelName !== channelName)) {
+    removeActivePresence(socket, false);
+  } else {
+    removeActivePresence(socket, true);
+  }
+
+  socket.data.username = username;
+  socket.data.channelName = channelName;
+  socket.data.notificationOnly = true;
+  socketUsers.set(socket.id, { username, channelName, notificationOnly: true });
+  notificationSockets.set(username, { socket, channelName });
+
+  if (!channels.has(channelName)) channels.set(channelName, new Map());
+  channels.get(channelName).set(username, { socketId: null, notificationOnly: true });
+  socket.leave(channelName);
+
+  socket.emit("notification_registration_result", {
+    success: true,
+    message: `Notification mode registered for ${channelName}`,
+  });
+  // Deliver notifications queued before notification mode started.
+  emitPendingNotifications(socket, username);
+  broadcastUsers(channelName);
+}
+
 io.on("connection", (socket) => {
   socket.on("join_channel", (payload = {}) => {
     const username = clean(payload.username);
@@ -113,14 +169,22 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Demo-compatible room password check. Replace with a database lookup in production.
+    const oldInfo = socketUsers.get(socket.id);
+    if (oldInfo && (oldInfo.username !== username || oldInfo.channelName !== channelName || oldInfo.notificationOnly)) {
+      const oldChannel = oldInfo.channelName;
+      removeActivePresence(socket, false);
+      socket.leave(oldChannel);
+      broadcastUsers(oldChannel);
+    }
+
     socket.join(channelName);
     socket.data.username = username;
     socket.data.channelName = channelName;
-    socketUsers.set(socket.id, { username, channelName });
+    socket.data.notificationOnly = false;
+    socketUsers.set(socket.id, { username, channelName, notificationOnly: false });
 
     if (!channels.has(channelName)) channels.set(channelName, new Map());
-    channels.get(channelName).set(username, socket.id);
+    channels.get(channelName).set(username, { socketId: socket.id, notificationOnly: false });
     onlineUsers.set(username, { socketId: socket.id, channelName, socket });
 
     socket.emit("join_result", { success: true, message: `Joined ${channelName}` });
@@ -128,22 +192,49 @@ io.on("connection", (socket) => {
     broadcastUsers(channelName);
   });
 
+  socket.on("leave_channel", () => {
+    const info = removeActivePresence(socket, false);
+    if (!info) return;
+    socket.data.notificationOnly = false;
+    socketUsers.set(socket.id, { ...info, notificationOnly: false });
+    socket.leave(info.channelName);
+    broadcastUsers(info.channelName);
+  });
+
+  socket.on("register_notification", (payload = {}) => {
+    const username = clean(payload.username);
+    const channelName = clean(payload.channelName);
+    const password = clean(payload.password);
+
+    if (!username || !channelName || !password) {
+      socket.emit("notification_registration_result", {
+        success: false,
+        message: "Username, channel and password are required",
+      });
+      return;
+    }
+
+    // Keep the user in the channel list, but mark them offline so other
+    // clients can show Come Back and queue an offline notification.
+    registerNotificationPresence(socket, username, channelName);
+  });
+
   socket.on("request_talk", (payload = {}) => {
     const channelName = clean(payload.channelName || socket.data.channelName);
     const username = clean(payload.username || socket.data.username);
-    if (!channelName || !username) return;
+    if (!channelName || !username || socket.data.notificationOnly) return;
     socket.to(channelName).emit("floor_status", { isBusy: true, speaker: username });
     socket.emit("talk_granted", { success: true });
   });
 
   socket.on("stop_talk", (payload = {}) => {
     const channelName = clean(payload.channelName || socket.data.channelName);
-    if (channelName) io.to(channelName).emit("floor_status", { isBusy: false, speaker: "" });
+    if (channelName && !socket.data.notificationOnly) io.to(channelName).emit("floor_status", { isBusy: false, speaker: "" });
   });
 
   socket.on("send_audio", (payload = {}) => {
     const channelName = clean(payload.channelName || socket.data.channelName);
-    if (!channelName || !payload.audioData) return;
+    if (!channelName || !payload.audioData || socket.data.notificationOnly) return;
     socket.to(channelName).emit("receive_audio", {
       username: clean(payload.username || socket.data.username),
       audioData: String(payload.audioData),
@@ -157,6 +248,7 @@ io.on("connection", (socket) => {
     if (!targetUsername) return;
 
     const target = findUser(targetUsername);
+    const notificationSocket = findNotificationSocket(targetUsername, channelName);
     const notification = {
       type: "nudge",
       senderUsername,
@@ -174,6 +266,9 @@ io.on("connection", (socket) => {
         reason: "USER_ONLINE",
         message: "This notification is for offline users only",
       });
+    } else if (notificationSocket) {
+      notificationSocket.emit("offline_notification", notification);
+      socket.emit("notify_result", { success: true, delivered: true, queued: false });
     } else {
       queueForUser(targetUsername, notification);
       socket.emit("notify_result", { success: true, delivered: false, queued: true });
@@ -199,6 +294,7 @@ io.on("connection", (socket) => {
       message: message.slice(0, MAX_MESSAGE_LENGTH),
     };
     const target = findUser(targetUsername);
+    const notificationSocket = findNotificationSocket(targetUsername, channelName);
 
     if (target && target.socket && target.channelName === channelName) {
       socket.emit("notify_result", {
@@ -208,6 +304,9 @@ io.on("connection", (socket) => {
         reason: "USER_ONLINE",
         message: "This notification is for offline users only",
       });
+    } else if (notificationSocket) {
+      notificationSocket.emit("offline_notification", notification);
+      socket.emit("notify_result", { success: true, delivered: true, queued: false });
     } else {
       queueForUser(targetUsername, notification);
       socket.emit("notify_result", { success: true, delivered: false, queued: true });
@@ -220,14 +319,14 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     const info = socketUsers.get(socket.id);
-    socketUsers.delete(socket.id);
     if (!info) return;
-    const current = onlineUsers.get(info.username);
-    if (current && current.socketId === socket.id) onlineUsers.delete(info.username);
-    const members = channels.get(info.channelName);
-    if (members && members.get(info.username) === socket.id) members.delete(info.username);
-    if (members && members.size === 0) channels.delete(info.channelName);
-    else broadcastUsers(info.channelName);
+
+    // Retain notification-only presence as an offline member after socket loss.
+    removeActivePresence(socket, Boolean(info.notificationOnly));
+    const notificationEntry = notificationSockets.get(info.username);
+    if (notificationEntry && notificationEntry.socket.id === socket.id) notificationSockets.delete(info.username);
+    socketUsers.delete(socket.id);
+    broadcastUsers(info.channelName);
   });
 });
 
